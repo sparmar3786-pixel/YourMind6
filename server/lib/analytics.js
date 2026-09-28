@@ -21,5 +21,7 @@ function expectedValue(winRate,target,entry,stopLoss) {
   const p=Number(winRate)>1?Number(winRate)/100:Number(winRate);
   return p*(Number(target)-Number(entry))-(1-p)*(Number(entry)-Number(stopLoss));
 }
-function isVerifiedSignal({winRatePct,trades}) { return Number(winRatePct)>=80&&Number(trades)>=100; }
+function isVerifiedSignal({winRatePct,trades,backtested=false}) {
+  return Boolean(backtested)&&Number(winRatePct)>=80&&Number(trades)>=100;
+}
 module.exports={classifyOI,calcPCR,findSupportResistance,expectedValue,isVerifiedSignal};
