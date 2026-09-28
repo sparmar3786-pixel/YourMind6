@@ -1,0 +1,24 @@
+workflows:
+  yourmind6-android-debug:
+    name: YourMind6 - Angel One Live APK
+    max_build_duration: 60
+    instance_type: linux_x2
+    scripts:
+      - name: Set Android SDK location
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/android_app/local.properties"
+      - name: Verify project
+        script: |
+          test -f "$CM_BUILD_DIR/android_app/settings.gradle"
+          test -f "$CM_BUILD_DIR/android_app/app/src/main/java/com/sachin/yourmind6/MainActivity.java"
+          test -f "$CM_BUILD_DIR/android_app/app/src/main/assets/index.html"
+      - name: Build debug APK
+        script: |
+          cd "$CM_BUILD_DIR/android_app"
+          gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify APK
+        script: |
+          test -f "$CM_BUILD_DIR/android_app/app/build/outputs/apk/debug/app-debug.apk"
+          ls -lh "$CM_BUILD_DIR/android_app/app/build/outputs/apk/debug/app-debug.apk"
+    artifacts:
+      - android_app/app/build/outputs/apk/debug/app-debug.apk
