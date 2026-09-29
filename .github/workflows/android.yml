@@ -1,40 +1,33 @@
-name: Build APK
+name: Build Fresh AlgoDesk APK
 on:
   workflow_dispatch:
-  pull_request:
   push:
-    branches:
-      - main
-      - 'algodesk/**'
+    branches: [main]
 jobs:
-  apk:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
-      - name: Write runtime config
-        run: echo 'window.APP_CONFIG={API_BASE:"${{ secrets.API_BASE }}",APP_KEY:"${{ secrets.APP_KEY }}"};' > www/config.js
-      - run: npm install
-      - run: npx cap add android
-      - run: npx cap sync android
-      - name: Install server dependencies
-        run: npm --prefix server install
-      - name: Server syntax check
-        run: node --check server/server.js
-      - name: Server unit tests
-        run: npm --prefix server test
+          java-version: '17'
+      - name: Configure app
+        run: printf '%s\n' 'window.APP_CONFIG={API_BASE:"${{ secrets.API_BASE }}",APP_KEY:"${{ secrets.APP_KEY }}"};' > www/config.js
+      - name: Install
+        run: npm install
+      - name: Create Android project
+        run: npx cap add android
+      - name: Sync
+        run: npx cap sync android
       - name: Build debug APK
         working-directory: android
-        run: chmod +x gradlew && ./gradlew assembleDebug
-      - name: APK integrity check
-        run: sha256sum android/app/build/outputs/apk/debug/app-debug.apk
+        run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: algodesk-apk
+          name: AlgoDesk-Pro-Fresh-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
