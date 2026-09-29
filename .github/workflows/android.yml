@@ -23,11 +23,15 @@ jobs:
       - run: npm install
       - run: npx cap add android
       - run: npx cap sync android
+      - name: Server syntax check
+        run: node --check server/server.js
       - name: Server unit tests
         run: npm --prefix server test
       - name: Build debug APK
         working-directory: android
         run: chmod +x gradlew && ./gradlew assembleDebug
+      - name: APK integrity check
+        run: sha256sum android/app/build/outputs/apk/debug/app-debug.apk
       - uses: actions/upload-artifact@v4
         with:
           name: algodesk-apk
