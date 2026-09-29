@@ -23,6 +23,8 @@ jobs:
       - run: npm install
       - run: npx cap add android
       - run: npx cap sync android
+      - name: Install server dependencies
+        run: npm --prefix server install
       - name: Server syntax check
         run: node --check server/server.js
       - name: Server unit tests
