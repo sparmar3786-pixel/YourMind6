@@ -1,0 +1,5 @@
+node_modules/
+android/
+server/.env
+server/tokens-cache.json
+*.apk
