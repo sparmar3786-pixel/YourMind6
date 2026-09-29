@@ -90,7 +90,7 @@ function broadcast(obj){for(const ws of streamClients)wsSend(ws,obj)}
 function parseAngelTick(data){
  const b=Buffer.isBuffer(data)?data:Buffer.from(data);
  if(b.length<51)return null;
- const token=b.subarray(2,27).toString('utf8').replace(/\\0/g,'').trim();
+ const token=b.subarray(2,27).toString('utf8').replace(/\0/g,'').trim();
  const exchangeType=b.readInt8(1);
  const ltp=b.readInt32LE(43)/100;
  const ts=b.readBigInt64LE(35);
