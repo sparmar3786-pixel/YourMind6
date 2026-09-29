@@ -3,6 +3,8 @@ const express=require('express'),cors=require('cors'),{authenticator}=require('o
 const e=express();e.use(cors());e.use(express.json({limit:'8mb'}));
 const {PORT=8787,APP_KEY,ANGEL_API_KEY,ANGEL_CLIENT_CODE,ANGEL_PIN,ANGEL_TOTP_SECRET,ANTHROPIC_API_KEY,MODEL='claude-haiku-4-5-20251001',BRAVE_API_KEY}=process.env;
 const A='https://apiconnect.angelbroking.com',WSURL='wss://smartapisocket.angelone.in/smart-stream';
+const NSE_MCP_URL=process.env.NSE_MCP_URL||'https://mcp.nseindia.in/cmmkt/mcp';
+let mcp={sessionId:null,protocolVersion:null,tools:[],connected:false,lastError:null,nextId:1};
 const IDX={'NIFTY 50':['NSE','99926000'],'BANKNIFTY':['NSE','99926009'],'FINNIFTY':['NSE','99926037'],'MIDCPNIFTY':['NSE','99926074'],'SENSEX':['BSE','99919000']};
 let sess=null,master=null,liveSocket=null,liveConnecting=false,liveWanted={},liveClients=new Set(),liveLast={};
 e.use('/api',(q,s,n)=>{const key=q.get('x-app-key')||q.query.appKey;if(APP_KEY&&key!==APP_KEY)return s.status(401).json({error:'unauthorized'});n()});
@@ -20,6 +22,57 @@ async function ensureLive(){if(liveSocket&&liveSocket.readyState===WebSocket.OPE
 setInterval(()=>{if(liveSocket?.readyState===WebSocket.OPEN)liveSocket.send('ping')},30000);
 function want(ex,tokens,mode){const key=String(ex);liveWanted[key]??={ex,mode,tokens:[]};liveWanted[key].mode=mode;liveWanted[key].tokens=[...new Set([...liveWanted[key].tokens,...tokens.map(String)])];if(liveSocket?.readyState===WebSocket.OPEN)liveSocket.send(JSON.stringify({correlationID:'algodesk01',action:1,params:{mode,tokenList:[{exchangeType:ex,tokens:tokens.map(String)}]}}));ensureLive().catch(()=>{})}
 for(const [n,[ex,t]] of Object.entries(IDX))want(ex==='NSE'?1:3,[t],1);
+
+
+function mcpParseResponse(text,contentType){
+  if(contentType&&contentType.includes('text/event-stream')){
+    const events=text.split(/\n\n+/).map(x=>x.split('\n').filter(l=>l.startsWith('data:')).map(l=>l.slice(5).trim()).join('\n')).filter(Boolean);
+    for(let i=events.length-1;i>=0;i--)try{return JSON.parse(events[i])}catch{}
+    throw Error('NSE MCP returned an unreadable SSE response');
+  }
+  try{return JSON.parse(text)}catch{throw Error('NSE MCP returned non-JSON response: '+text.slice(0,240))}
+}
+async function mcpPost(payload,{sessionId=null,protocolVersion=null,modern=false}={}){
+  const h={'content-type':'application/json','accept':'application/json, text/event-stream'};
+  if(sessionId)h['Mcp-Session-Id']=sessionId;
+  if(protocolVersion)h['MCP-Protocol-Version']=protocolVersion;
+  if(modern){
+    h['Mcp-Method']=payload.method;
+    if(payload.params?.name)h['Mcp-Name']=payload.params.name;
+  }
+  const r=await fetch(NSE_MCP_URL,{method:'POST',headers:h,body:JSON.stringify(payload)});
+  const text=await r.text();
+  const data=mcpParseResponse(text,r.headers.get('content-type')||'');
+  if(!r.ok)throw Error(data?.error?.message||('NSE MCP HTTP '+r.status));
+  return {data,headers:r.headers};
+}
+async function mcpConnect(){
+  mcp={sessionId:null,protocolVersion:null,tools:[],connected:false,lastError:null,nextId:mcp.nextId||1};
+  const id=mcp.nextId++;
+  const init=await mcpPost({jsonrpc:'2.0',id,method:'initialize',params:{
+    protocolVersion:'2025-11-25',
+    capabilities:{},
+    clientInfo:{name:'AlgoDesk Pro',version:'1.0.0'}
+  }});
+  const result=init.data?.result;
+  if(!result)throw Error(init.data?.error?.message||'NSE MCP initialize failed');
+  mcp.sessionId=init.headers.get('mcp-session-id')||null;
+  mcp.protocolVersion=result.protocolVersion||'2025-11-25';
+  await mcpPost({jsonrpc:'2.0',method:'notifications/initialized',params:{}},{sessionId:mcp.sessionId,protocolVersion:mcp.protocolVersion});
+  const listed=await mcpPost({jsonrpc:'2.0',id:mcp.nextId++,method:'tools/list',params:{}},{sessionId:mcp.sessionId,protocolVersion:mcp.protocolVersion});
+  mcp.tools=listed.data?.result?.tools||[];
+  mcp.connected=true;
+  mcp.lastError=null;
+  return mcp;
+}
+async function mcpEnsure(){
+  if(mcp.connected&&mcp.sessionId)return mcp;
+  return mcpConnect();
+}
+e.get('/api/nse-mcp/status',(q,s)=>s.json({url:NSE_MCP_URL,connected:mcp.connected,protocolVersion:mcp.protocolVersion,tools:mcp.tools,lastError:mcp.lastError}));
+e.post('/api/nse-mcp/connect',async(q,s)=>{try{s.json({ok:true,...await mcpConnect()})}catch(x){mcp.connected=false;mcp.lastError=x.message;s.status(502).json({ok:false,url:NSE_MCP_URL,error:x.message})}});
+e.post('/api/nse-mcp/tools',async(q,s)=>{try{await mcpEnsure();const r=await mcpPost({jsonrpc:'2.0',id:mcp.nextId++,method:'tools/list',params:{}},{sessionId:mcp.sessionId,protocolVersion:mcp.protocolVersion});mcp.tools=r.data?.result?.tools||[];s.json({ok:true,tools:mcp.tools})}catch(x){mcp.lastError=x.message;s.status(502).json({ok:false,error:x.message})}});
+e.post('/api/nse-mcp/call',async(q,s)=>{try{await mcpEnsure();const name=String(q.body?.name||'');if(!name)throw Error('Tool name is required');const args=q.body?.arguments&&typeof q.body.arguments==='object'?q.body.arguments:{};const r=await mcpPost({jsonrpc:'2.0',id:mcp.nextId++,method:'tools/call',params:{name,arguments:args}},{sessionId:mcp.sessionId,protocolVersion:mcp.protocolVersion});s.json({ok:true,result:r.data?.result||r.data})}catch(x){mcp.lastError=x.message;s.status(502).json({ok:false,error:x.message})}});
 
 e.get('/api/health',(q,s)=>s.json({ok:true,angel:!!(ANGEL_API_KEY&&ANGEL_CLIENT_CODE&&ANGEL_PIN&&ANGEL_TOTP_SECRET),websocket:!!liveSocket&&liveSocket.readyState===WebSocket.OPEN,ai:!!ANTHROPIC_API_KEY,search:!!BRAVE_API_KEY}));
 e.get('/api/live',(q,s)=>{s.setHeader('Content-Type','text/event-stream');s.setHeader('Cache-Control','no-cache');s.setHeader('Connection','keep-alive');s.flushHeaders?.();liveClients.add(s);s.write('data: '+JSON.stringify({type:'status',live:!!liveSocket&&liveSocket.readyState===WebSocket.OPEN,time:new Date().toISOString()})+'\\n\\n');Object.values(liveLast).slice(-200).forEach(t=>s.write('data: '+JSON.stringify({type:'tick',...t})+'\\n\\n'));q.on('close',()=>liveClients.delete(s));ensureLive().catch(()=>{})});
