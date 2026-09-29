@@ -13,7 +13,7 @@
 <div id="sheet" class="sheet" hidden><section><div class="row"><b id="sheetTitle">AlgoDesk AI</b><button id="close" class="chip">✕</button></div><div class="small">सिर्फ दिए गए डेटा पर जानकारी; कोई buy/sell आदेश नहीं।</div><pre id="aiBody">AI सोच रहा है…</pre><div class="row"><input id="aiQ" placeholder="AI से पूछें…"><button id="send" class="chip go">भेजें</button></div><div class="small" style="margin-top:7px">AI window बंद करने पर live Angel One data, polling और option-chain refresh चलते रहेंगे।</div></section></div>
 <script>
 const C=window.APP_CONFIG||{},API=(C.API_BASE||'').replace(/\/$/,'');
-let tab='market',live=false,selectedIndex='NIFTY 50',chainData=null,aiOpen=false,aiBusy=false;
+let tab='market',live=false,streamLive=false,selectedIndex='NIFTY 50',chainData=null,aiOpen=false,aiBusy=false,streamSocket=null,streamTimer=null,streamDirty=false;
 let idx=[['NIFTY 50',25184.3,.42],['BANKNIFTY',54301.2,.35],['FINNIFTY',26012.5,.28],['SENSEX',82146.8,.39],['MIDCPNIFTY',13120.4,.31]];
 let stocks=[['RELIANCE',2948.5,.82,1.9],['HDFCBANK',1669.2,-.74,2.6],['SBIN',813.1,.91,-1.8],['TATAMOTORS',968.4,-.66,-2.2],['INFY',1843,.58,1.4],['ICICIBANK',1214.6,-.48,1.7],['TCS',3905,.44,-1.2],['BAJFINANCE',6940,-.92,-1.9],['ITC',468.3,.52,2.3],['LT',3610,-.41,1.1]].map(x=>({s:x[0],p:x[1],chg:x[2],oiChg:x[3]}));
 const signals=[['NIFTY 50','CALL','25200',112,88,158,84,212],['BANKNIFTY','PUT','54300',245,195,345,81,164],['SENSEX','CALL','82200',310,250,430,82,138]];
@@ -26,7 +26,7 @@ function ev(x){return(x[6]/100)*(x[5]-x[3])-(1-x[6]/100)*(x[3]-x[4])}
 function stock(x){let t=oi(x);return '<div class="li"><div><div class="sym">'+x.s+'</div><span class="badge '+t[1]+'">'+t[0]+'</span></div><div><b>'+money(x.p)+'</b><div class="'+(x.chg>=0?'up':'dn')+'">'+pct(x.chg)+' · OI '+(x.oiChg==null?'n/a':pct(x.oiChg))+'</div></div><button class="chip" onclick="event.stopPropagation();ask('+JSON.stringify(x.s+' OI aur price data')+')">AI</button></div>'}
 function market(){let up=stocks.filter(x=>x.chg>=0).length,s=[...stocks].sort((a,b)=>b.chg-a.chg);return '<div class="card"><div class="row"><b>Market breadth</b><span class="small">'+up+' up · '+(stocks.length-up)+' down</span></div><div class="bar" style="margin-top:9px;background:linear-gradient(90deg,var(--up) '+(up/stocks.length*100)+'%,var(--dn) '+(up/stocks.length*100)+'%)"></div></div><h2>Top gainers</h2><div class="card">'+s.slice(0,3).map(stock).join('')+'</div><h2>Top losers</h2><div class="card">'+s.slice(-3).reverse().map(stock).join('')+'</div>'}
 function signalsView(){return '<div class="chips">'+idx.map(x=>'<button class="chip" onclick="selectIndex('+JSON.stringify(x[0])+')">'+x[0]+'</button>').join('')+'</div><div class="notice">Verified signal तभी दिखेगा जब historical backtest में कम से कम 100 completed trades और ≥80% win rate हो। अभी live levels reference/unverified हैं।</div>'+idx.map(i=>'<div class="card" onclick="selectIndex('+JSON.stringify(i[0])+')"><div class="row"><b>'+i[0]+'</b><span class="badge w">Unverified</span></div><div class="small">Touch करें → CE/PE option chain, Strike, ATM/ITM/OTM और Entry/SL/Target reference levels.</div></div>').join('')}
-function selectIndex(name){selectedIndex=name;chainData=null;tab='oi';render()}
+function selectIndex(name){selectedIndex=name;chainData=null;tab='oi';render();if(streamSocket&&streamSocket.readyState===1)streamSocket.send(JSON.stringify({action:'subscribeIndex',index:name}))}
 function chainRow(r){let atm=Math.abs(Number(r.strike)-Number(chainData.atmStrike))<1e-9;return '<tr class="'+(atm?'atm':'')+'" onclick="openContract('+JSON.stringify(r.strike)+')"><td><b>'+money(r.strike)+'</b><br><span class="badge '+(atm?'w':'')+'">'+r.moneyness+'</span></td><td class="ce"><b>'+money(r.ce?.ltp)+'</b><br>OI '+money(r.ce?.oi)+'<br>ΔOI '+(r.ce?.oiChgPct==null?'—':pct(r.ce.oiChgPct))+'</td><td class="pe"><b>'+money(r.pe?.ltp)+'</b><br>OI '+money(r.pe?.oi)+'<br>ΔOI '+(r.pe?.oiChgPct==null?'—':pct(r.pe.oiChgPct))+'</td><td><button class="chip" onclick="event.stopPropagation();ask('+JSON.stringify(selectedIndex+' option chain strike AI')+')">AI</button></td></tr>'}
 function renderChain(d){chainData=d;let b=document.getElementById('chainbox');if(!b)return;b.innerHTML='<div class="card"><div class="row"><div><b>'+d.index+'</b><div class="small">Spot ₹'+money(d.spot)+' · Expiry '+d.expiry+'</div></div><button class="chip go" onclick="ask('+JSON.stringify(d.index+' option chain PCR support resistance OI')+')">✦ AI</button></div><div class="meta"><span>PCR <b>'+money(d.pcr)+'</b></span><span>Support <b>'+money(d.support)+'</b></span><span>Resistance <b>'+money(d.resistance)+'</b></span><span>ATM <b>'+money(d.atmStrike)+'</b></span></div></div><div class="tablewrap"><table class="chain"><thead><tr><th>Strike / Zone</th><th class="ce">CALL / CE</th><th class="pe">PUT / PE</th><th>AI</th></tr></thead><tbody>'+d.rows.map(chainRow).join('')+'</tbody></table></div><div class="notice">'+d.note+'</div>'}
 async function loadChain(name){try{let d=await api('/api/option-chain?index='+encodeURIComponent(name));renderChain(d)}catch(e){let b=document.getElementById('chainbox');if(b)b.innerHTML='<div class="card"><b>Option chain unavailable</b><div class="small">'+e.message+'</div><button class="chip go" onclick="loadChain('+JSON.stringify(name)+')">Retry</button></div>'}}
@@ -35,7 +35,7 @@ function openContract(strike){let r=chainData?.rows?.find(x=>Number(x.strike)===
 function oiLab(){return '<div class="chips">'+idx.map(x=>'<button class="chip" onclick="selectIndex('+JSON.stringify(x[0])+')">'+x[0]+'</button>').join('')+'</div><div id="chainbox"><div class="loading">Option chain load हो रही है…</div></div><h2>Stock OI classification</h2><div class="card">'+stocks.map(stock).join('')+'</div>'}
 function watch(){return '<div class="card">'+stocks.map(stock).join('')+'</div>'}
 function search(){return '<div class="card"><input id="sq" placeholder="NIFTY OI, market news…"><div class="row" style="margin-top:8px"><button id="s" class="chip go">Search</button><button id="sa" class="chip go">Search + AI</button></div><div id="sr"></div></div><div class="card"><b>Broker screen AI</b><div class="small">Photo/text पढ़ें; password/PIN/OTP न दें।</div><textarea id="paste" rows="4" placeholder="Broker data paste करें"></textarea><input id="photo" type="file" accept="image/*" style="margin-top:8px"><button id="pa" class="chip go" style="margin-top:8px">AI से पढ़वाएँ</button></div>'}
-function more(){return '<div class="card"><div class="row"><b>Angel One connection</b><span class="pill">'+(live?'Live':'Demo data')+'</span></div><p class="small">Quotes server के जरिए आते हैं। Broker credentials केवल server पर रहते हैं।</p></div><div class="grid">'+['Charts','Option chain','Positions · view only','Holdings · view only','Order book · view only','Price alerts','Scanners','News'].map(x=>'<div class="card"><b>'+x+'</b></div>').join('')+'</div>'}
+function more(){return '<div class="card"><div class="row"><b>Angel One connection</b><span class="pill">'+(streamLive?'Live WebSocket':(live?'Live REST':'Demo data'))+'</span></div><p class="small">Live feed server-side Angel One WebSocket 2.0 से आता है। AI window बंद/open करने से feed बंद नहीं होती। Broker credentials केवल server पर रहते हैं।</p></div><div class="grid">'+['Charts','Option chain','Positions · view only','Holdings · view only','Order book · view only','Price alerts','Scanners','News'].map(x=>'<div class="card"><b>'+x+'</b></div>').join('')+'</div>'}
 function render(){document.getElementById('tickers').innerHTML=idx.map(x=>'<button class="tk" onclick="selectIndex('+JSON.stringify(x[0])+')"><b>'+x[0]+'</b><strong>'+money(x[1])+'</strong><span class="'+(x[2]>=0?'up':'dn')+'">'+pct(x[2])+'</span></button>').join('');document.getElementById('view').innerHTML={market:market,signals:signalsView,oi:oiLab,watch:watch,search:search,more:more}[tab]();document.getElementById('nav').innerHTML=[['market','Market'],['signals','Signals'],['oi','OI Lab'],['watch','Watch'],['search','Search'],['more','More']].map(x=>'<button class="'+(tab===x[0]?'active':'')+'" onclick="tab=\''+x[0]+'\';render()">'+x[1]+'</button>').join('');if(tab==='search')initSearch();if(tab==='oi'&&!chainData)loadChain(selectedIndex)}
 function api(path,opt){if(!API)return Promise.reject(new Error('Backend not connected'));return fetch(API+path,Object.assign({headers:{'Content-Type':'application/json','x-app-key':C.APP_KEY||''}},opt||{})).then(async r=>{let j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j})}
 async function ask(q){document.getElementById('aiDock').classList.remove('panel-open');aiOpen=true;document.getElementById('sheet').hidden=false;document.getElementById('fab').classList.add('open');document.getElementById('fab').textContent='✕ AI';if(aiBusy)return;aiBusy=true;document.getElementById('aiBody').textContent='AI सोच रहा है…';try{let context={selectedIndex,indices:idx,stocks,optionChain:chainData,signals:signals.filter(verified)};let j=await api('/api/ai',{method:'POST',body:JSON.stringify({messages:[{role:'user',content:'सिर्फ दिए गए डेटा पर सरल हिंदी में 120 शब्दों के भीतर पाँच headings: क्या हो रहा है:, पॉज़िटिव:, नेगेटिव:, दिक्कत / रिस्क:, अब क्या देखें:। कोई आंकड़ा/खबर न गढ़ो, profit guarantee या buy/sell instruction न दो। सवाल: '+q+' DATA: '+JSON.stringify(context)}]})});document.getElementById('aiBody').textContent=j.text}catch(e){document.getElementById('aiBody').textContent=e.message}finally{aiBusy=false}}
@@ -46,5 +46,45 @@ function closeAI(){aiOpen=false;document.getElementById('sheet').hidden=true;doc
 document.getElementById('close').onclick=closeAI;
 const savedTheme=localStorage.getItem('algodesk-theme');if(savedTheme==='light')document.documentElement.classList.add('light');document.getElementById('theme').textContent=document.documentElement.classList.contains('light')?'🌙':'☀️';document.getElementById('theme').onclick=()=>{document.documentElement.classList.toggle('light');const l=document.documentElement.classList.contains('light');localStorage.setItem('algodesk-theme',l?'light':'dark');document.getElementById('theme').textContent=l?'🌙':'☀️'};document.getElementById('fab').onclick=()=>aiOpen?closeAI():ask('पूरे market, OI और option chain का summary दो');document.getElementById('send').onclick=()=>ask(document.getElementById('aiQ').value||'इस data को समझाओ');
 setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),1000);
-async function pull(){if(!API)return;try{let j=await api('/api/quotes');(j.indices||[]).forEach(q=>{let x=idx.find(i=>i[0]===q.n);if(x){x[1]=q.p;x[2]=q.chg}});(j.stocks||[]).forEach(q=>{let x=stocks.find(s=>s.s===q.s);if(x)Object.assign(x,q)});live=true;document.getElementById('status').textContent='Live · Angel One';render()}catch(e){live=false;document.getElementById('status').textContent='Demo data'}}setInterval(pull,5000);setInterval(()=>{if(tab==='oi'&&selectedIndex&&!aiBusy)loadChain(selectedIndex)},10000);pull();render();
+function connectStream(){
+ if(!API)return;
+ if(streamSocket&&[0,1].includes(streamSocket.readyState))return;
+ const base=API.replace(/^http/,'ws');
+ const url=base+'/api/stream?appKey='+encodeURIComponent(C.APP_KEY||'');
+ try{
+   streamSocket=new WebSocket(url);
+   streamSocket.onopen=()=>{streamLive=true;live=true;document.getElementById('status').textContent='Live · Angel One';streamSocket.send(JSON.stringify({action:'subscribeIndex',index:selectedIndex}))};
+   streamSocket.onmessage=e=>{
+     try{
+       const m=JSON.parse(e.data);
+       if(m.type==='stream'){if(m.state==='connected'||m.state==='options-subscribed'){streamLive=true;live=true;document.getElementById('status').textContent='Live · Angel One'}else if(m.state==='reconnecting'){streamLive=false;document.getElementById('status').textContent='Reconnecting…'}}
+       if(m.type==='tick'){
+         const meta=m.meta||{};
+         if(meta.kind==='index'){const x=idx.find(i=>i[0]===meta.name);if(x){x[1]=m.ltp;streamDirty=true}}
+         if(meta.kind==='stock'){const x=stocks.find(st=>st.s===meta.name);if(x){x.p=m.ltp;streamDirty=true}}
+         if(meta.kind==='option'&&chainData&&meta.index===selectedIndex){
+           const row=chainData.rows.find(r=>Number(r.strike)===Number(meta.strike));
+           if(row&&row[meta.side==='CE'?'ce':'pe']){row[meta.side==='CE'?'ce':'pe'].ltp=m.ltp;streamDirty=true}
+         }
+       }
+     }catch(_e){}
+   };
+   streamSocket.onclose=()=>{streamLive=false;document.getElementById('status').textContent=live?'Reconnecting…':'Demo data';setTimeout(connectStream,5000)};
+   streamSocket.onerror=()=>{};
+ }catch(_e){setTimeout(connectStream,5000)}
+}
+async function pull(){
+ if(!API)return;
+ try{
+   let j=await api('/api/quotes');
+   (j.indices||[]).forEach(q=>{let x=idx.find(i=>i[0]===q.n);if(x){x[1]=q.p;x[2]=q.chg}});
+   (j.stocks||[]).forEach(q=>{let x=stocks.find(s=>s.s===q.s);if(x)Object.assign(x,q)});
+   live=true;if(!streamLive)document.getElementById('status').textContent='Live · Angel One';
+   streamDirty=true;
+ }catch(e){if(!streamLive){live=false;document.getElementById('status').textContent='Demo data'}}
+}
+setInterval(pull,5000);
+setInterval(()=>{if(streamDirty){streamDirty=false;render()}},1000);
+setInterval(()=>{if(tab==='oi'&&selectedIndex&&!aiBusy)loadChain(selectedIndex)},10000);
+pull();render();connectStream();
 </script></body></html>
