@@ -1,6 +1,1 @@
-{
-  "appId":"com.algodesk.app",
-  "appName":"AlgoDesk",
-  "webDir":"www",
-  "server":{"androidScheme":"https"}
-}
+{"appId":"com.algodesk.fresh","appName":"AlgoDesk Pro","webDir":"www","server":{"androidScheme":"https"}}
