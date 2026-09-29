@@ -42,7 +42,7 @@ async function mcpPost(payload,{sessionId=null,protocolVersion=null,modern=false
   }
   const r=await fetch(NSE_MCP_URL,{method:'POST',headers:h,body:JSON.stringify(payload)});
   const text=await r.text();
-  const data=mcpParseResponse(text,r.headers.get('content-type')||'');
+  const data=text.trim()?mcpParseResponse(text,r.headers.get('content-type')||''):{};
   if(!r.ok)throw Error(data?.error?.message||('NSE MCP HTTP '+r.status));
   return {data,headers:r.headers};
 }
