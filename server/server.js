@@ -1,5 +1,6 @@
 require('dotenv').config();
-const express=require('express'),cors=require('cors'),dns=require('dns').promises,net=require('net');
+const express=require('express'),cors=require('cors'),dns=require('dns').promises,net=require('net'),http=require('http');
+const {WebSocketServer,WebSocket}=require('ws');
 const {authenticator}=require('otplib');
 const {classifyOI,calcPCR,findSupportResistance,expectedValue,isVerifiedSignal}=require('./lib/analytics');
 
@@ -36,6 +37,19 @@ app.post('/api/webask',heavy,async(req,res)=>{try{const q=String(req.body?.q||''
 const ANGEL='https://apiconnect.angelone.in',IDX_TOK={'NIFTY 50':['NSE','99926000','NIFTY'],BANKNIFTY:['NSE','99926009','BANKNIFTY'],FINNIFTY:['NSE','99926037','FINNIFTY'],MIDCPNIFTY:['NSE','99926074','MIDCPNIFTY'],SENSEX:['BSE','99919000','SENSEX']},STOCKS=['RELIANCE','HDFCBANK','SBIN','TATAMOTORS','INFY','ICICIBANK','TCS','BAJFINANCE','ITC','LT'];
 let session=null,master=null,cache=null,chainCache=new Map(),lastOI=new Map();
 const h=extra=>({'Content-Type':'application/json',Accept:'application/json','X-UserType':'USER','X-SourceID':'WEB','X-ClientLocalIP':'127.0.0.1','X-ClientPublicIP':'127.0.0.1','X-MACAddress':'00:00:00:00:00:00','X-PrivateKey':ANGEL_API_KEY,...extra});
+let keeperTimer=null;
+async function startSessionKeeper(){
+ if(keeperTimer||!session)return;
+ keeperTimer=setInterval(async()=>{
+   if(!session)return;
+   try{
+     const r=await fetch(ANGEL+'/rest/secure/angelbroking/user/v1/getProfile',{method:'GET',headers:h({Authorization:'Bearer '+session.jwt})});
+     if(!r.ok)throw new Error('profile HTTP '+r.status);
+   }catch(_e){
+     try{await angelLogin()}catch(__e){}
+   }
+ },240000);
+}
 async function angelLogin(){if(!(ANGEL_API_KEY&&ANGEL_CLIENT_CODE&&ANGEL_PIN&&ANGEL_TOTP_SECRET))throw new Error('Angel One env set nahi hain');const r=await fetch(ANGEL+'/rest/auth/angelbroking/user/v1/loginByPassword',{method:'POST',headers:h(),body:JSON.stringify({clientcode:ANGEL_CLIENT_CODE,password:ANGEL_PIN,totp:authenticator.generate(ANGEL_TOTP_SECRET)})}),j=await r.json();if(!j.status)throw new Error('Angel login: '+(j.message||r.status));session={jwt:j.data.jwtToken,feed:j.data.feedToken,at:Date.now()};startSessionKeeper()}
 async function loadMaster(){if(master)return master;const r=await fetch('https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json');if(!r.ok)throw new Error('ScripMaster HTTP '+r.status);const rows=await r.json(),eq={};for(const x of rows)if(x.exch_seg==='NSE'&&STOCKS.includes(x.name)&&x.symbol===x.name+'-EQ')eq[x.name]=x.token;return master={rows,eq}}
 async function angelQuote(tokens){const call=()=>fetch(ANGEL+'/rest/secure/angelbroking/market/v1/quote/',{method:'POST',headers:h({Authorization:'Bearer '+session.jwt}),body:JSON.stringify({mode:'FULL',exchangeTokens:tokens})}).then(r=>r.json());if(!session||Date.now()-session.at>21600000)await angelLogin();let j=await call();if(!j.status){await angelLogin();j=await call()}if(!j.status)throw new Error('Angel quote: '+(j.message||'fail'));return j.data?.fetched||[]}
@@ -64,4 +78,110 @@ async function getOptionChain(indexName){
 }
 app.get('/api/option-chain',heavy,async(req,res)=>{try{const indexName=String(req.query.index||'NIFTY 50'),key=indexName+'|'+Math.floor(Date.now()/5000);if(chainCache.has(key))return res.json(chainCache.get(key));const data=await getOptionChain(indexName);chainCache.set(key,data);for(const k of [...chainCache.keys()])if(k.startsWith(indexName+'|')&&k!==key)chainCache.delete(k);res.json(data)}catch(e){res.status(503).json({error:e.message})}});
 
-app.listen(PORT,()=>console.log('AlgoDesk fresh server listening on '+PORT));
+
+// Angel One WebSocket 2.0 shared live feed.
+// Closing the AI sheet in the APK never touches this connection.
+const streamClients=new Set();
+const streamMeta=new Map();
+let angelStream=null,angelStreamRetry=null,angelHeartbeat=null,angelStreamConnecting=false;
+
+function wsSend(ws,obj){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj))}
+function broadcast(obj){for(const ws of streamClients)wsSend(ws,obj)}
+function parseAngelTick(data){
+ const b=Buffer.isBuffer(data)?data:Buffer.from(data);
+ if(b.length<51)return null;
+ const token=b.subarray(2,27).toString('utf8').replace(/\\0/g,'').trim();
+ const exchangeType=b.readInt8(1);
+ const ltp=b.readInt32LE(43)/100;
+ const ts=b.readBigInt64LE(35);
+ return {token,exchangeType,ltp,exchangeTs:Number(ts)};
+}
+function exchangeTypeFor(seg){
+ return seg==='NSE'?1:seg==='NFO'?2:seg==='BSE'?3:seg==='BFO'?4:5;
+}
+function scheduleAngelStream(){
+ if(angelStreamRetry)return;
+ angelStreamRetry=setTimeout(()=>{angelStreamRetry=null;ensureAngelStream().catch(()=>{})},5000);
+}
+async function subscribeAngel(tokensByExchange){
+ if(!angelStream||angelStream.readyState!==WebSocket.OPEN)return;
+ const tokenList=Object.entries(tokensByExchange).filter(([,tokens])=>tokens?.length).map(([exchangeType,tokens])=>({exchangeType:Number(exchangeType),tokens:[...new Set(tokens.map(String))].slice(0,1000)}));
+ if(!tokenList.length)return;
+ angelStream.send(JSON.stringify({correlationID:'ALGODESK01',action:1,params:{mode:1,tokenList}}));
+}
+async function ensureAngelStream(){
+ if(angelStreamConnecting||(angelStream&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(angelStream.readyState)))return;
+ angelStreamConnecting=true;
+ try{
+   if(!session||Date.now()-session.at>21600000)await angelLogin();
+   const url='wss://smartapisocket.angelone.in/smart-stream?clientCode='+encodeURIComponent(ANGEL_CLIENT_CODE)+'&feedToken='+encodeURIComponent(session.feed)+'&apiKey='+encodeURIComponent(ANGEL_API_KEY);
+   const ws=new WebSocket(url);
+   angelStream=ws;
+   ws.on('open',async()=>{
+     angelStreamConnecting=false;
+     if(angelHeartbeat)clearInterval(angelHeartbeat);
+     angelHeartbeat=setInterval(()=>{if(ws.readyState===WebSocket.OPEN)ws.send('ping')},25000);
+     try{
+       const m=await loadMaster();
+       const nse=Object.values(IDX_TOK).filter(x=>x[0]==='NSE').map(x=>x[1]).concat(Object.values(m.eq));
+       const bse=Object.values(IDX_TOK).filter(x=>x[0]==='BSE').map(x=>x[1]);
+       for(const [n,[e,t]] of Object.entries(IDX_TOK))streamMeta.set(String(t),{kind:'index',name:n});
+       for(const [n,t] of Object.entries(m.eq))streamMeta.set(String(t),{kind:'stock',name:n});
+       await subscribeAngel({1:nse,3:bse});
+       broadcast({type:'stream',state:'connected',source:'Angel One WebSocket 2.0'});
+     }catch(e){broadcast({type:'stream',state:'error',message:e.message})}
+   });
+   ws.on('message',(data)=>{
+     if(typeof data==='string'||Buffer.isBuffer(data)&&data.toString()==='pong')return;
+     const tick=parseAngelTick(data);
+     if(!tick||tick.ltp==null)return;
+     const meta=streamMeta.get(tick.token)||{};
+     broadcast({type:'tick',...tick,meta});
+   });
+   ws.on('error',e=>broadcast({type:'stream',state:'error',message:String(e.message||e)}));
+   ws.on('close',()=>{
+     angelStreamConnecting=false;
+     if(angelHeartbeat){clearInterval(angelHeartbeat);angelHeartbeat=null}
+     if(angelStream===ws)angelStream=null;
+     broadcast({type:'stream',state:'reconnecting'});
+     scheduleAngelStream();
+   });
+ }catch(e){
+   angelStreamConnecting=false;
+   broadcast({type:'stream',state:'error',message:e.message});
+   scheduleAngelStream();
+ }
+}
+async function subscribeIndexOptions(indexName){
+ const meta=IDX_TOK[indexName];if(!meta)return;
+ const m=await loadMaster(),exchange=meta[0]==='NSE'?'NFO':'BFO',name=meta[2];
+ const opts=m.rows.filter(x=>x.exch_seg===exchange&&String(x.name||'').toUpperCase()===name&&['CE','PE'].includes(String(x.instrumenttype||'').toUpperCase())&&parseExpiry(x.expiry)?.getTime()>=Date.now());
+ if(!opts.length)return;
+ const expiries=[...new Map(opts.map(x=>[String(x.expiry),parseExpiry(x.expiry)])).entries()].sort((a,b)=>a[1]-b[1]),expiry=expiries[0][0];
+ const exp=opts.filter(x=>String(x.expiry)===expiry).map(x=>({...x,strike:optionStrike(x.strike),side:String(x.instrumenttype).toUpperCase()})).filter(x=>x.strike!=null);
+ const spot=(await angelQuote({[meta[0]]:[meta[1]]}))[0]?.ltp;
+ const strikes=[...new Set(exp.map(x=>x.strike))].sort((a,b)=>a-b).sort((a,b)=>Math.abs(a-spot)-Math.abs(b-spot)).slice(0,21);
+ const selected=exp.filter(x=>strikes.includes(x.strike));
+ selected.forEach(x=>streamMeta.set(String(x.token),{kind:'option',index:indexName,side:x.side,strike:x.strike,symbol:x.symbol,token:x.token}));
+ await subscribeAngel({[exchangeTypeFor(exchange)]:selected.map(x=>x.token)});
+ broadcast({type:'stream',state:'options-subscribed',index:indexName,count:selected.length});
+}
+const server=http.createServer(app);
+const wss=new WebSocketServer({server,path:'/api/stream'});
+wss.on('connection',async(ws,req)=>{
+ const u=new URL(req.url,'http://localhost');
+ const key=u.searchParams.get('appKey')||'';
+ if(APP_KEY&&key!==APP_KEY){ws.close(1008,'unauthorized');return}
+ streamClients.add(ws);
+ wsSend(ws,{type:'stream',state:'connecting',source:'Angel One WebSocket 2.0'});
+ try{await ensureAngelStream()}catch(_e){}
+ ws.on('message',async raw=>{
+   try{
+     const msg=JSON.parse(String(raw));
+     if(msg?.action==='subscribeIndex'&&IDX_TOK[msg.index])await subscribeIndexOptions(msg.index);
+   }catch(_e){}
+ });
+ ws.on('close',()=>streamClients.delete(ws));
+});
+server.listen(PORT,()=>console.log('AlgoDesk fresh server listening on '+PORT));
+
