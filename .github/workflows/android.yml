@@ -30,3 +30,5 @@ jobs:
         with:
           name: AlgoDesk-Pro-Fresh-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+# Rebuild verification trigger: 2026-09-29T04:27:43.495Z
